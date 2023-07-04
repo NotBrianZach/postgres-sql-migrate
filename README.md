@@ -13,6 +13,7 @@ psql postgresql://postgres:postgres@localhost:54322/postgres -f install.sql
 psql postgresql://postgres:postgres@localhost:54322/postgres -f example.sql
 
 
+
 Some potential future features (via gpt4)
 
 Automatic Dependency Resolution: Enhance the migration system to automatically apply required migrations if they haven't been applied yet, and in the correct order based on dependencies. The same can be done for rollbacks: automatically rollback dependent migrations before rolling back the one they depend on.

@@ -1,15 +1,3 @@
--- This file provides a method for applying incremental schema changes
--- to a PostgreSQL database.
-
--- Add your migrations at the end of the file, and run "psql -v ON_ERROR_STOP=1 -1f
--- migrations.sql yourdbname" to apply all pending migrations. The
--- "-1" causes all the changes to be applied atomically
-
--- Most Rails (ie. ActiveRecord) migrations are run by a user with
--- full read-write access to both the schema and its contents, which
--- isn't ideal. You'd generally run this file as a database owner, and
--- the contained migrations would grant access to less-privileged
--- application-level users as appropriate.
 DO
 $body$
 BEGIN
@@ -64,6 +52,7 @@ BEGIN
     AS $$
           DECLARE
           var_dep TEXT;
+          var_dep_ddl TEXT;
           var_conflict TEXT;
     BEGIN
       LOCK TABLE _v.patches IN EXCLUSIVE MODE;
@@ -72,24 +61,33 @@ BEGIN
           AND
         NOT EXISTS (SELECT 1 FROM _v.patch_conflicts c WHERE c.patch_name = in_patch_name)
       THEN
-        RAISE NOTICE 'Applying patch: %', in_patch_name;
-        EXECUTE in_ddl;
-        INSERT INTO _v.patches (patch_name, ddl, rollback_ddl) VALUES (in_patch_name, in_ddl, in_rollback_ddl);
-        IF dependencies IS NOT NULL THEN
-          foreach var_dep IN ARRAY dependencies LOOP
-            INSERT INTO _v.patch_deps (patch_name, depend_name) VALUES (in_patch_name, var_dep);
-          END LOOP;
-        END IF;
-
         IF conflicts IS NOT NULL THEN
           IF EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = ANY(conflicts)) THEN
             RAISE NOTICE 'Patch % already applied', in_patch_name;
             RETURN FALSE;
           END IF;
+
           foreach var_conflict IN ARRAY conflicts LOOP
             INSERT INTO _v.patch_conflicts (patch_name, conflict_name) VALUES (in_patch_name, var_conflict);
           END LOOP;
         END IF;
+
+        IF dependencies IS NOT NULL THEN
+          foreach var_dep IN ARRAY dependencies LOOP
+             INSERT INTO _v.patch_deps (patch_name, depend_name) VALUES (in_patch_name, var_dep);
+             IF NOT EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_dep) THEN
+               RAISE NOTICE 'Applying previously rollbacked dependant patch: %', var_dep;
+               SELECT ddl INTO var_dep_ddl FROM _v.rollbacked_patches WHERE patch_name = var_dep;
+               EXECUTE var_dep_ddl;
+             END IF;
+          END LOOP;
+        END IF;
+
+        RAISE NOTICE 'Applying patch: %', in_patch_name;
+        EXECUTE in_ddl;
+
+        INSERT INTO _v.patches (patch_name, ddl, rollback_ddl) VALUES (in_patch_name, in_ddl, in_rollback_ddl);
+
         RETURN TRUE;
       END IF;
       RETURN FALSE;
@@ -98,40 +96,44 @@ BEGIN
   END IF;
 
   IF NOT EXISTS (SELECT FROM pg_catalog.pg_proc WHERE proname = 'rollback_patch') THEN
-CREATE FUNCTION _v.rollback_patch (in_patch_name TEXT) RETURNS BOOLEAN
-AS $$
-  DECLARE
-    var_dependent_patch TEXT;
-    var_rollback_ddl TEXT;
-    dependent_patches CURSOR FOR
-      SELECT depend_name FROM _v.patch_deps WHERE depend_name = in_patch_name;
-  BEGIN
-    SELECT rollback_ddl INTO var_rollback_ddl FROM _v.patches WHERE patch_name = in_patch_name;
-    IF NOT FOUND THEN
-      RAISE EXCEPTION 'Patch % not found', in_patch_name;
-    END IF;
+    CREATE FUNCTION _v.rollback_patch (in_patch_name TEXT) RETURNS BOOLEAN
+    AS $$
+      DECLARE
+        var_dependent_patch TEXT;
+        var_rollback_ddl TEXT;
+        var_ddl TEXT;
+        dependent_patches CURSOR FOR
+          SELECT depend_name FROM _v.patch_deps WHERE depend_name = in_patch_name;
+      BEGIN
+        LOCK TABLE _v.rollback_patches IN EXCLUSIVE MODE;
+        SELECT ddl,rollback_ddl INTO var_ddl,var_rollback_ddl FROM _v.patches WHERE patch_name = in_patch_name;
 
-    -- Retrieve dependent patches
-    OPEN dependent_patches;
-    LOOP
-      FETCH dependent_patches INTO var_dependent_patch;
-      EXIT WHEN NOT FOUND;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'Patch % not found', in_patch_name;
+        END IF;
 
-      -- Rollback and raise notice for each dependent patch
-      RAISE NOTICE 'Rolling back dependent patch: %', var_dependent_patch;
-      PERFORM _v.rollback_patch(var_dependent_patch);
-    END LOOP;
-    CLOSE dependent_patches;
+        -- Retrieve dependent patches
+        OPEN dependent_patches;
+        LOOP
+          FETCH dependent_patches INTO var_dependent_patch;
+          EXIT WHEN NOT FOUND;
+          -- Rollback and raise notice for each dependent patch
+          RAISE NOTICE 'Rolling back dependent patch: %', var_dependent_patch;
+          PERFORM _v.rollback_patch(var_dependent_patch);
+        END LOOP;
+        CLOSE dependent_patches;
 
-    -- Execute rollback ddl for in_patch_name
-    RAISE NOTICE 'Rolling back patch: %', in_patch_name;
-    EXECUTE var_rollback_ddl;
-    DELETE FROM _v.patches WHERE patch_name = in_patch_name;
-    RETURN TRUE;
-  END;
-$$ LANGUAGE plpgsql;
+        -- Execute rollback ddl for in_patch_name
+        RAISE NOTICE 'Rolling back patch: %', in_patch_name;
+        EXECUTE var_rollback_ddl;
+
+        DELETE FROM _v.patches WHERE patch_name = in_patch_name;
+
+        INSERT INTO _v.rollbacked_patches (patch_name, ddl, rollback_ddl) VALUES (in_patch_name, var_ddl, var_rollback_ddl);
+
+        RETURN TRUE;
+      END;
+    $$ LANGUAGE plpgsql;
   END IF;
-
 END
 $body$;
-
