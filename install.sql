@@ -57,12 +57,11 @@ BEGIN
       END IF;
 
       IF conflicts IS NOT NULL THEN
-        SELECT c.conflict_name into var_conflict FROM _v.patch_conflicts c WHERE p.patch_name = ANY(c.conflict_name) limit 1;
-        IF EXISTS () THEN
-          RAISE EXCEPTION 'Conflicting patch % ', var_conflict;
-        END IF;
-
         foreach var_conflict IN ARRAY conflicts LOOP
+          IF EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_conflict) THEN
+            RAISE EXCEPTION 'Conflicting patch currently applied % ', var_conflict;
+          END IF;
+
           INSERT INTO _v.patch_conflicts (patch_name, conflict_name) VALUES (in_patch_name, var_conflict);
         END LOOP;
       END IF;
