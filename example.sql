@@ -32,9 +32,11 @@ SELECT _v.apply_patch('woofs_schema'::text,
 
 
 -- SELECT apply_patch('woofs_views',
+--                    ['woofs_schema', 'woofs_tables'],
+--                     NULL,
 -- $$
 --   -- SQL to apply goes here
---   CREATE TABLE things (
+--   CREATE view things (
 --     name TEXT
 --   );
--- $$);
+-- $$, $$ DROP VIEW things $$);
