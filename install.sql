@@ -69,17 +69,21 @@ BEGIN
       IF dependencies IS NOT NULL THEN
         foreach var_dep IN ARRAY dependencies LOOP
           IF NOT EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_dep) THEN
-            RAISE NOTICE 'Checking rollbacked patches for unapplied patch dependency: %', var_dep;
-            IF NOT EXISTS (SELECT 1 FROM _v.rollback_patches r WHERE r.patch_name = var_dep) THEN
-              RAISE EXCEPTION 'No rollback patch found for unnaplied patch dependency %, need to apply manually', var_dep;
-            END IF;
-            SELECT ddl INTO var_dep_ddl FROM _v.rollbacked_patches WHERE patch_name = var_dep;
-            RAISE NOTICE 'Rollbacked patch found; applying patch dependency: %', var_dep;
-            EXECUTE var_dep_ddl;
-            RAISE NOTICE 'Deleting relevant entry from rollback table: %', var_dep;
-            DELETE FROM _v.rollbacked_patches WHERE patch_name = var_dep;
+            RAISE EXCEPTION 'Patch dependency not found, apply that first: %', var_dep;
           END IF;
-          INSERT INTO _v.patch_deps (patch_name, depend_name) VALUES (in_patch_name, var_dep);
+            -- otheriwse would need to recurse through dependencies for each dependency
+
+          --   IF NOT EXISTS (SELECT 1 FROM _v.rollback_patches r WHERE r.patch_name = var_dep) THEN
+          --     RAISE EXCEPTION 'No rollback patch found for unnaplied patch dependency %, need to apply manually', var_dep;
+          --   END IF;
+          --   -- select dep_ddl into var_dep_ddl from _v.rollback_patches where patch_name = var_dep;
+          --   SELECT ddl INTO var_dep_ddl FROM _v.rollbacked_patches WHERE patch_name = var_dep;
+          --   RAISE NOTICE 'Rollbacked patch found; applying patch dependency: %', var_dep;
+          --   EXECUTE var_dep_ddl;
+          --   RAISE NOTICE 'Deleting relevant entry from rollback table: %', var_dep;
+          --   DELETE FROM _v.rollbacked_patches WHERE patch_name = var_dep;
+          -- END IF;
+          -- INSERT INTO _v.patch_deps (patch_name, depend_name) VALUES (in_patch_name, var_dep);
         END LOOP;
       END IF;
 
@@ -100,8 +104,9 @@ BEGIN
         var_dependent_patch TEXT;
         var_rollback_ddl TEXT;
         var_ddl TEXT;
-        dependent_patches CURSOR FOR
-          SELECT depend_name FROM _v.patch_deps WHERE depend_name = in_patch_name;
+        -- TODO handle recursive rollback
+        -- dependent_patches CURSOR FOR
+        --   SELECT depend_name FROM _v.patch_deps WHERE depend_name = in_patch_name;
       BEGIN
         LOCK TABLE _v.rollback_patches IN EXCLUSIVE MODE;
 
@@ -110,15 +115,26 @@ BEGIN
         IF NOT FOUND THEN
           RAISE EXCEPTION 'Rollback ddl for patch % not found', in_patch_name;
         END IF;
+        IF EXISTS (select 1 from _v.patch_deps where depend_name = in_patch_name) THEN
+          RAISE EXCEPTION 'Patch % has dependent patches, rollback those first', (select patch_name from _v.patch_deps where depend_name = in_patch_name);
+        END IF;
 
         -- Retrieve dependent patches
         OPEN dependent_patches;
         LOOP
           FETCH dependent_patches INTO var_dependent_patch;
           EXIT WHEN NOT FOUND;
-          -- Rollback and raise notice for each dependent patch
-          RAISE NOTICE 'Rolling back dependent patch: %', var_dependent_patch;
-          PERFORM _v.rollback_patch(var_dependent_patch);
+          -- TODO handle recursive rollback
+          -- IF EXISTS (SELECT 1 FROM _v.rollback_patches r WHERE r.patch_name = var_dependent_patch) THEN
+          --   RAISE EXCEPTION 'Rollback patch already applied: %', var_dependent_patch;
+          -- END IF;
+
+          -- IF EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_dependent_patch) THEN
+          --   -- Rollback and raise notice for each dependent patch
+          --   RAISE NOTICE 'Rolling back dependent patch: %', var_dependent_patch;
+          --   PERFORM _v.rollback_patch(var_dependent_patch);
+          --   CONTINUE;
+          -- END IF;
         END LOOP;
         CLOSE dependent_patches;
 
