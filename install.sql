@@ -47,6 +47,9 @@ BEGIN
           var_dep TEXT;
           var_dep_ddl TEXT;
           var_conflict TEXT;
+          var_dep_rollback_ddl TEXT;
+          var_dep_conflicts TEXT[];
+          var_dep_dependencies TEXT[];
     BEGIN
       LOCK TABLE _v.patches IN EXCLUSIVE MODE;
 
@@ -67,24 +70,28 @@ BEGIN
       END IF;
 
       IF dependencies IS NOT NULL THEN
-        foreach var_dep IN ARRAY dependencies LOOP
-          IF NOT EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_dep) THEN
-            RAISE EXCEPTION 'Patch dependency not found, apply that first: %', var_dep;
-          END IF;
-            -- otheriwse would need to recurse through dependencies for each dependency
+          FOREACH var_dep IN ARRAY dependencies LOOP
+              IF NOT EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_dep) THEN
+                  IF NOT EXISTS (SELECT 1 FROM _v.rollbacked_patches r WHERE r.patch_name = var_dep) THEN
+                      RAISE EXCEPTION 'No rollback patch found for unapplied patch dependency %, need to apply manually', var_dep;
+                  END IF;
 
-          --   IF NOT EXISTS (SELECT 1 FROM _v.rollback_patches r WHERE r.patch_name = var_dep) THEN
-          --     RAISE EXCEPTION 'No rollback patch found for unnaplied patch dependency %, need to apply manually', var_dep;
-          --   END IF;
-          --   -- select dep_ddl into var_dep_ddl from _v.rollback_patches where patch_name = var_dep;
-          --   SELECT ddl INTO var_dep_ddl FROM _v.rollbacked_patches WHERE patch_name = var_dep;
-          --   RAISE NOTICE 'Rollbacked patch found; applying patch dependency: %', var_dep;
-          --   EXECUTE var_dep_ddl;
-          --   RAISE NOTICE 'Deleting relevant entry from rollback table: %', var_dep;
-          --   DELETE FROM _v.rollbacked_patches WHERE patch_name = var_dep;
-          -- END IF;
-          -- INSERT INTO _v.patch_deps (patch_name, depend_name) VALUES (in_patch_name, var_dep);
-        END LOOP;
+                  SELECT ddl, rollback_ddl INTO var_dep_ddl, var_dep_rollback_ddl FROM _v.rollbacked_patches WHERE patch_name = var_dep;
+                  RAISE NOTICE 'Rollbacked patch found; applying patch dependency: %', var_dep;
+
+                  -- Getting dependencies of the rollbacked patch
+                  SELECT ARRAY_AGG(depend_name) INTO var_dep_dependencies FROM _v.patch_deps WHERE patch_name = var_dep;
+
+                  SELECT ARRAY_AGG(conflict_name) INTO var_dep_conflicts FROM _v.patch_conflicts WHERE patch_name = var_dep;
+
+                  PERFORM _v.apply_patch(var_dep, var_dep_dependencies, var_dep_conflicts, var_dep_ddl, var_dep_rollback_ddl);
+
+                  RAISE NOTICE 'Deleting relevant entry from rollback table: %', var_dep;
+                  DELETE FROM _v.rollbacked_patches WHERE patch_name = var_dep;
+              END IF;
+
+              INSERT INTO _v.patch_deps (patch_name, depend_name) VALUES (in_patch_name, var_dep);
+          END LOOP;
       END IF;
 
       RAISE NOTICE 'Applying patch: %', in_patch_name;
@@ -101,42 +108,34 @@ BEGIN
     CREATE FUNCTION _v.rollback_patch (in_patch_name TEXT) RETURNS BOOLEAN
     AS $$
       DECLARE
-        var_dependent_patch TEXT;
+        var_dep TEXT;
         var_rollback_ddl TEXT;
         var_ddl TEXT;
-        -- TODO handle recursive rollback
-        -- dependent_patches CURSOR FOR
-        --   SELECT depend_name FROM _v.patch_deps WHERE depend_name = in_patch_name;
+        var_dependencies TEXT[];
+        var_dep_dependencies TEXT[];
       BEGIN
         LOCK TABLE _v.rollback_patches IN EXCLUSIVE MODE;
 
         SELECT ddl,rollback_ddl INTO var_ddl,var_rollback_ddl FROM _v.patches WHERE patch_name = in_patch_name;
 
-        IF NOT FOUND THEN
+        IF rollback_ddl IS NULL THEN
           RAISE EXCEPTION 'Rollback ddl for patch % not found', in_patch_name;
         END IF;
-        IF EXISTS (select 1 from _v.patch_deps where depend_name = in_patch_name) THEN
-          RAISE EXCEPTION 'Patch % has dependent patches, rollback those first', (select patch_name from _v.patch_deps where depend_name = in_patch_name);
+
+        IF var_ddl IS NULL THEN
+          RAISE EXCEPTION 'DDL for patch % not found when trying to transition into rollback_table', in_patch_name;
         END IF;
 
-        -- Retrieve dependent patches
-        OPEN dependent_patches;
-        LOOP
-          FETCH dependent_patches INTO var_dependent_patch;
-          EXIT WHEN NOT FOUND;
-          -- TODO handle recursive rollback
-          -- IF EXISTS (SELECT 1 FROM _v.rollback_patches r WHERE r.patch_name = var_dependent_patch) THEN
-          --   RAISE EXCEPTION 'Rollback patch already applied: %', var_dependent_patch;
-          -- END IF;
-
-          -- IF EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_dependent_patch) THEN
-          --   -- Rollback and raise notice for each dependent patch
-          --   RAISE NOTICE 'Rolling back dependent patch: %', var_dependent_patch;
-          --   PERFORM _v.rollback_patch(var_dependent_patch);
-          --   CONTINUE;
-          -- END IF;
-        END LOOP;
-        CLOSE dependent_patches;
+        SELECT ARRAY_AGG(patch_name) INTO var_dependencies FROM _v.patch_deps WHERE depend_name = in_patch_name;
+        IF var_dependencies IS NOT NULL THEN
+            FOREACH var_dep IN ARRAY var_dependencies LOOP
+                IF EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_dep) THEN
+                    SELECT ddl, rollback_ddl INTO var_dep_ddl, var_dep_rollback_ddl FROM _v.rollbacked_patches WHERE patch_name = var_dep;
+                    RAISE NOTICE 'Rollback patch dependency found; initiating dependency roll back for: %', var_dep;
+                    PERFORM _v.rollback_patch(var_dep);
+                END IF;
+            END LOOP;
+        END IF;
 
         -- Execute rollback ddl for in_patch_name
         RAISE NOTICE 'Rolling back patch: %', in_patch_name;
@@ -145,6 +144,7 @@ BEGIN
         DELETE FROM _v.patches WHERE patch_name = in_patch_name;
 
         INSERT INTO _v.rollbacked_patches (patch_name, ddl, rollback_ddl) VALUES (in_patch_name, var_ddl, var_rollback_ddl);
+        RAISE NOTICE 'patch rolled back, tables updated: %', in_patch_name;
 
         RETURN TRUE;
       END;
