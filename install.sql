@@ -111,6 +111,8 @@ BEGIN
         var_dep TEXT;
         var_rollback_ddl TEXT;
         var_ddl TEXT;
+        var_dep_ddl TEXT;
+        var_dep_rollback_ddl TEXT;
         var_dependencies TEXT[];
         var_dep_dependencies TEXT[];
       BEGIN
