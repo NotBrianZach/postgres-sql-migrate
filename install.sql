@@ -132,7 +132,7 @@ BEGIN
 
         SELECT ddl,rollback_ddl INTO var_ddl,var_rollback_ddl FROM _v.patches WHERE patch_name = in_patch_name;
 
-        IF rollback_ddl IS NULL THEN
+        IF var_rollback_ddl IS NULL THEN
           RAISE EXCEPTION 'Rollback ddl for patch % not found', in_patch_name;
         END IF;
 
