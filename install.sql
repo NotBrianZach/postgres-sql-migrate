@@ -146,7 +146,7 @@ BEGIN
                 IF EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_dep) THEN
                     SELECT ddl, rollback_ddl INTO var_dep_ddl, var_dep_rollback_ddl FROM _v.rollbacked_patches WHERE patch_name = var_dep;
                     RAISE NOTICE 'Rollback patch dependency found; initiating dependency roll back for: %', var_dep;
-                    delete * from _v.patch_deps where patch_name = var_dep;
+                    delete from _v.patch_deps where patch_name = var_dep;
                     PERFORM _v.rollback_patch(var_dep);
                 END IF;
             END LOOP;
