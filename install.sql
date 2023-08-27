@@ -9,6 +9,8 @@ BEGIN
     CREATE TABLE _v.rollbacked_patches (
       patch_name TEXT NOT NULL PRIMARY KEY,
       ddl TEXT NOT NULL,
+      patch_dependencies TEXT[],
+      patch_conflicts TEXT[],
       rollback_ddl TEXT NOT NULL,
       rollbacked_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     );
@@ -141,7 +143,10 @@ BEGIN
         END IF;
 
         SELECT ARRAY_AGG(patch_name) INTO var_dependencies FROM _v.patch_deps WHERE depend_name = in_patch_name;
+
+        RAISE NOTICE 'Before Rolling back patch: %, var_dependencies %', in_patch_name, var_dependencies;
         IF var_dependencies IS NOT NULL THEN
+          RAISE NOTICE 'hullo';
             FOREACH var_dep IN ARRAY var_dependencies LOOP
                 IF EXISTS (SELECT 1 FROM _v.patches p WHERE p.patch_name = var_dep) THEN
                     SELECT ddl, rollback_ddl INTO var_dep_ddl, var_dep_rollback_ddl FROM _v.rollbacked_patches WHERE patch_name = var_dep;
@@ -156,6 +161,7 @@ BEGIN
         RAISE NOTICE 'Rolling back patch: %', in_patch_name;
         EXECUTE var_rollback_ddl;
 
+        delete from _v.patch_deps where patch_name = in_patch_name;
         DELETE FROM _v.patches WHERE patch_name = in_patch_name;
 
         INSERT INTO _v.rollbacked_patches (patch_name, ddl, rollback_ddl) VALUES (in_patch_name, var_ddl, var_rollback_ddl);
